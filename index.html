@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Auto MPG Story — A Martini Glass Narrative</title>
+  <style>
+    :root{
+      --bg:#0b1020;
+      --panel:#121a32;
+      --ink:#e6ecff;
+      --muted:#9fb0df;
+      --accent:#7aa2ff;
+      --accent2:#ffb86b;
+      --grid:#223055;
+      --anno:#ffc857;
+    }
+    html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial}
+    .wrap{max-width:1100px;margin:0 auto;padding:24px}
+    header{display:flex;gap:16px;align-items:center;justify-content:space-between}
+    h1{font-weight:800;letter-spacing:.3px;margin:0;font-size:clamp(20px,3vw,28px)}
+    .sub{color:var(--muted);margin-top:4px}
+    .panel{background:var(--panel);border-radius:18px;padding:16px 18px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+    #chart{width:100%;height:560px}
+    .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+    button, select{background:#1a2550;color:var(--ink);border:1px solid #2e3c6e;border-radius:12px;padding:8px 12px;cursor:pointer}
+    button[disabled]{opacity:.5;cursor:not-allowed}
+    .btn-accent{background:var(--accent);border-color:transparent;color:#081021}
+    .legend{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+    .legend .item{display:flex;align-items:center;gap:6px;color:var(--muted)}
+    .dot{width:10px;height:10px;border-radius:50%}
+    .tip{position:absolute;pointer-events:none;background:#0b0f1f;color:var(--ink);border:1px solid #2b375f;border-radius:10px;padding:8px 10px;font-size:13px;box-shadow:0 10px 24px rgba(0,0,0,.35)}
+    .caption{color:var(--muted);margin-top:8px}
+    .anno-note{fill:var(--ink);font-weight:600}
+    .anno-connector, .anno-line{stroke:var(--anno)}
+    .grid line{stroke:var(--grid)}
+    a{color:var(--accent)}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>How Engine Size & Weight Shape Fuel Economy</h1>
+      <div class="sub">Auto MPG (1970–1982): a martini-glass narrative with exploration at the end</div>
+    </div>
+    <div class="controls">
+      <button id="prev">◀︎ Back</button>
+      <button id="next" class="btn-accent">Next ▶︎</button>
+      <button id="restart" title="Restart the guided tour">Restart</button>
+      <span id="sceneLabel" class="sub"></span>
+    </div>
+  </header>
+
+  <div id="chart" class="panel"></div>
+  <div class="panel" style="margin-top:14px">
+    <div class="legend" id="legend"></div>
+    <div class="caption" id="caption"></div>
+  </div>
+
+  <p class="caption">Data source: <a href="https://archive.ics.uci.edu/ml/datasets/auto+mpg" target="_blank" rel="noopener">UCI Machine Learning Repository – Auto MPG</a>. Dataset contains fuel economy information for cars from 1970-1982.</p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3-svg-annotation@2.5.1"></script>
+<script>
+(function(){
+  const state = {
+    scene: 0,
+    xField: 'weight',
+    yField: 'mpg',
+    colorBy: 'cylinders',
+    highlight: null,
+    exploreUnlocked: false,
+    currentData: null
+  };
+
+  let all = [];
+  
+  // Load the Auto MPG dataset from CSV file
+  d3.csv("auto-mpg.csv", d => {
+    ['mpg','cylinders','displacement','horsepower','weight','acceleration','modelyear'].forEach(field => {
+      d[field] = +d[field] || null;
+    });
+    d.origin = +d.origin;
+    return d;
+  }).then(data => {
+    all = data.filter(d => d.mpg && d.weight && d.displacement && d.cylinders);
+    state.currentData = all;
+    initialize();
+  }).catch(err => {
+    console.error("Error loading data:", err);
+    d3.select('#chart').append('div')
+      .style('padding', '20px')
+      .style('color', '#ff6b6b')
+      .html('Error loading auto-mpg.csv. Please ensure the file is in the same directory as index.html');
+  });
+
+
+  const root = d3.select('#chart');
+  const W = root.node().clientWidth;
+  const H = root.node().clientHeight;
+  const margin = {top: 24, right: 24, bottom: 60, left: 64};
+  const innerW = W - margin.left - margin.right;
+  const innerH = H - margin.top - margin.bottom;
+
+  const svg = root.append('svg').attr('width', W).attr('height', H);
+  const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+  const gx = g.append('g').attr('class','x axis').attr('transform',`translate(0,${innerH})`);
+  const gy = g.append('g').attr('class','y axis');
+  const gGrid = g.append('g').attr('class','grid');
+  const gDots = g.append('g').attr('class','dots');
+  const gAnn = g.append('g').attr('class','annotations');
+  const xLabel = svg.append('text').attr('text-anchor','middle').attr('x', margin.left+innerW/2).attr('y', H-16).attr('fill','#cfd8ff');
+  const yLabel = svg.append('text').attr('text-anchor','middle').attr('transform', `translate(16,${margin.top+innerH/2}) rotate(-90)`).attr('fill','#cfd8ff');
+
+  const tip = d3.select('body').append('div').attr('class','tip').style('opacity',0);
+
+  const x = d3.scaleLinear().range([0, innerW]);
+  const y = d3.scaleLinear().range([innerH, 0]);
+  const r = d3.scaleSqrt().range([3, 10]);
+  const color = d3.scaleOrdinal()
+    .domain([3,4,5,6,8])
+    .range(['#6ee7b7','#93c5fd','#fcd34d','#fb7185','#a78bfa']);
+
+  const legend = d3.select('#legend');
+  function renderLegend(){
+    legend.html('');
+    legend.append('div').attr('class','item').html(`<div class="dot" style="background:${color(3)}"></div>3 cyl`);
+    legend.append('div').attr('class','item').html(`<div class="dot" style="background:${color(4)}"></div>4 cyl`);
+    legend.append('div').attr('class','item').html(`<div class="dot" style="background:${color(5)}"></div>5 cyl`);
+    legend.append('div').attr('class','item').html(`<div class="dot" style="background:${color(6)}"></div>6 cyl`);
+    legend.append('div').attr('class','item').html(`<div class="dot" style="background:${color(8)}"></div>8 cyl`);
+    legend.append('div').attr('class','item').text('• Circle size → Displacement');
+  }
+
+  function initialize() {
+    renderLegend();
+    
+    x.domain(d3.extent(all, d => d[state.xField])).nice();
+    y.domain(d3.extent(all, d => d[state.yField])).nice();
+    r.domain(d3.extent(all, d => d.displacement));
+
+    updateAxes();
+    renderDots();
+    scene0();
+    updateNav();
+  }
+
+  function updateAxes(){
+    const xAxis = d3.axisBottom(x).ticks(6).tickSizeOuter(0);
+    const yAxis = d3.axisLeft(y).ticks(6).tickSizeOuter(0);
+
+    gx.transition().duration(600).call(xAxis);
+    gy.transition().duration(600).call(yAxis);
+
+    const xg = d3.axisBottom(x).ticks(6).tickSize(-innerH).tickFormat('');
+    const yg = d3.axisLeft(y).ticks(6).tickSize(-innerW).tickFormat('');
+    gGrid.selectAll('*').remove();
+    gGrid.append('g').attr('transform',`translate(0,${innerH})`).call(xg);
+    gGrid.append('g').call(yg);
+
+    xLabel.text(labelForField(state.xField));
+    yLabel.text(labelForField(state.yField));
+
+    d3.selectAll('.grid line').attr('stroke','#223055');
+    d3.selectAll('.axis path,.axis line').attr('stroke','#3b4b7c');
+    d3.selectAll('.axis text').attr('fill','#cfd8ff');
+  }
+
+  function labelForField(f){
+    return ({weight:'Vehicle weight (lb)', mpg:'Miles per gallon', horsepower:'Horsepower', displacement:'Displacement (cu in)'}[f]) || f;
+  }
+
+  function renderDots(){
+    const dots = gDots.selectAll('circle').data(state.currentData, d => d.name);
+
+    dots.enter().append('circle')
+      .attr('cx', d => x(d[state.xField]))
+      .attr('cy', d => y(d[state.yField]))
+      .attr('r', 0)
+      .attr('fill', d => color(d.cylinders))
+      .attr('opacity', 0.8)
+      .on('mousemove', (event,d) => {
+        tip.style('opacity',1)
+           .html(`<strong>${d.name}</strong><br>MPG: ${d.mpg}<br>HP: ${d.horsepower}<br>Weight: ${d.weight} lb<br>Cyl: ${d.cylinders}<br>Year: ${d.modelyear}`)
+           .style('left', (event.pageX+12)+'px')
+           .style('top', (event.pageY-28)+'px');
+      })
+      .on('mouseout', ()=> tip.style('opacity',0))
+      .transition().duration(700)
+      .attr('r', d => r(d.displacement));
+
+    dots.transition().duration(700)
+      .attr('cx', d => x(d[state.xField]))
+      .attr('cy', d => y(d[state.yField]))
+      .attr('r', d => r(d.displacement))
+      .attr('fill', d => color(d.cylinders))
+      .attr('opacity', d => state.highlight && !state.highlight.has(d.name) ? 0.2 : 0.85)
+      .attr('stroke', d => state.highlight && state.highlight.has(d.name) ? '#ffd166' : 'none')
+      .attr('stroke-width', d => state.highlight && state.highlight.has(d.name) ? 2 : 0);
+
+    dots.exit().transition().duration(500).attr('r', 0).remove();
+  }
+
+  function annotate(items){
+    gAnn.selectAll('*').remove();
+    if(!items || !items.length) return;
+    const makeAnnotations = d3.annotation()
+      .type(d3.annotationCalloutElbow)
+      .annotations(items.map(d => ({
+        note: { title: d.title, label: d.text, wrap: 200, align: 'left' },
+        x: x(d.x), y: y(d.y), dx: d.dx||20, dy: d.dy||-40,
+        color: '#ffc857'
+      })));
+    gAnn.call(makeAnnotations);
+    gAnn.selectAll('text').attr('class','anno-note');
+  }
+
+  const caption = d3.select('#caption');
+  const sceneLabel = d3.select('#sceneLabel');
+
+  function scene0(){
+    state.scene = 0;
+    state.xField = 'weight';
+    state.yField = 'mpg';
+    state.highlight = null;
+    state.currentData = all;
+    x.domain(d3.extent(all, d => d[state.xField])).nice();
+    y.domain(d3.extent(all, d => d[state.yField])).nice();
+    updateAxes();
+    renderDots();
+    annotate([
+      {title:'Heavier → Lower MPG', text:'Clear downward trend: as weight increases, fuel economy decreases dramatically.', x: 4200, y: 15, dx:-120, dy:-30},
+      {title:'Light, efficient cars', text:'Modern 4-cylinder cars cluster at high MPG with low weight.', x: 2100, y: 38, dx: 40, dy: -10}
+    ]);
+    caption.html('Scene 1/3 — Overview: Weight vs. MPG reveals the fundamental trade-off in automotive design. Heavier vehicles consistently show lower fuel economy.');
+    sceneLabel.text('Scene 1: Overview');
+  }
+
+  function scene1(){
+    state.scene = 1;
+    state.highlight = new Set(all.filter(d=>d.cylinders===8 || d.cylinders===4).map(d=>d.name));
+    state.currentData = all;
+    updateAxes();
+    renderDots();
+    annotate([
+      {title:'8-cylinder engines', text:'V8s dominate the heavy, low-MPG corner—muscle cars and trucks.', x: 4300, y: 14, dx:-20, dy:-60},
+      {title:'4-cylinder engines', text:'Efficient 4-cylinders cluster at lighter weights with 25+ MPG.', x: 2200, y: 34, dx:30, dy:-20}
+    ]);
+    caption.html('Scene 2/3 — Cylinders Focus: The engine size story. 8-cylinder vehicles average 14 MPG, while 4-cylinders achieve 28+ MPG—double the efficiency.');
+    sceneLabel.text('Scene 2: Cylinders');
+  }
+
+  function scene2(){
+    state.scene = 2;
+    state.highlight = new Set(
+      all.filter(d => (d.mpg <= 15 && d.weight >= 4200) || (d.mpg >= 38 && d.weight <= 2200)).map(d=>d.name)
+    );
+    state.currentData = all;
+    updateAxes();
+    renderDots();
+    annotate([
+      {title:'Gas guzzlers', text:'Heavy V8s getting under 15 MPG—typical 1970s American cars.', x: 4400, y: 13, dx:-30, dy:-60},
+      {title:'Efficiency champions', text:'Light imports achieving 38+ MPG—mostly Japanese models.', x: 2000, y: 42, dx: 40, dy: -30}
+    ]);
+    caption.html('Scene 3/3 — Outliers: The extremes tell the story. From 10 MPG muscle cars to 45+ MPG compacts—a 4x difference in fuel efficiency.');
+    sceneLabel.text('Scene 3: Outliers');
+  }
+
+  function sceneExplore(){
+    state.scene = 3;
+    state.highlight = null;
+    state.exploreUnlocked = true;
+    state.currentData = all;
+    updateAxes();
+    renderDots();
+    annotate([]);
+    caption.html(`Explore Mode — Now you can explore the data freely. Choose different axes, filter by cylinders, and hover over points for details.`);
+    sceneLabel.text('Explore Mode');
+    
+    explorePanel.style('display', 'inline-flex');
+  }
+
+  const prevBtn = d3.select('#prev');
+  const nextBtn = d3.select('#next');
+  const restartBtn = d3.select('#restart');
+
+  function go(delta){
+    const maxScene = 3;
+    let s = state.scene + delta;
+    s = Math.max(0, Math.min(maxScene, s));
+    if(s===0) scene0();
+    else if(s===1) scene1();
+    else if(s===2) scene2();
+    else sceneExplore();
+    updateNav();
+  }
+
+  function updateNav(){
+    prevBtn.attr('disabled', state.scene===0 ? true : null);
+    nextBtn.text(state.scene<3 ? 'Next ▶︎' : 'Explore Mode').attr('disabled', state.scene===3 ? true : null);
+  }
+
+  prevBtn.on('click', ()=> go(-1));
+  nextBtn.on('click', ()=> go(1));
+  restartBtn.on('click', ()=> { 
+    state.exploreUnlocked=false; 
+    explorePanel.style('display', 'none');
+    scene0(); 
+    updateNav(); 
+  });
+
+  const explorePanel = d3.select('.controls')
+    .append('span')
+    .style('margin-left','8px')
+    .style('display','none')
+    .style('gap','6px');
+
+  explorePanel.html(`
+    <label class="sub">X:</label>
+    <select id="xSel">
+      <option value="weight">Weight</option>
+      <option value="horsepower">Horsepower</option>
+      <option value="displacement">Displacement</option>
+      <option value="acceleration">Acceleration</option>
+    </select>
+    <label class="sub">Y:</label>
+    <select id="ySel">
+      <option value="mpg">MPG</option>
+      <option value="horsepower">Horsepower</option>
+      <option value="acceleration">Acceleration</option>
+    </select>
+    <label class="sub">Cylinders:</label>
+    <select id="cylSel">
+      <option value="all">All</option>
+      <option value="3">3</option>
+      <option value="4">4</option>
+      <option value="5">5</option>
+      <option value="6">6</option>
+      <option value="8">8</option>
+    </select>
+  `);
+
+  explorePanel.selectAll('select').on('change', function(){
+    if(!state.exploreUnlocked) return;
+    const id = this.id;
+    const v = this.value;
+    if(id==='xSel') state.xField = v;
+    if(id==='ySel') state.yField = v;
+    if(id==='cylSel') {
+      const filtered = v==='all' ? all : all.filter(d=> String(d.cylinders)===v);
+      state.currentData = filtered;
+      x.domain(d3.extent(filtered, d => d[state.xField])).nice();
+      y.domain(d3.extent(filtered, d => d[state.yField])).nice();
+    } else {
+      x.domain(d3.extent(state.currentData, d => d[state.xField])).nice();
+      y.domain(d3.extent(state.currentData, d => d[state.yField])).nice();
+    }
+    updateAxes();
+    renderDots();
+  });
+
+})();
+</script>
+</body>
+</html>
